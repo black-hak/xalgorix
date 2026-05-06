@@ -113,7 +113,7 @@ func load() *Config {
 		MemCompTimeout:  envOrInt("XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", 30),
 
 		// Runtime
-		RuntimeBackend: "native",
+		RuntimeBackend: "native", // Always native in Go version
 		Workspace:      workspace,
 		DisableBrowser: envOrBool("XALGORIX_DISABLE_BROWSER", false),
 		MaxIterations:  envOrInt("XALGORIX_MAX_ITERATIONS", 0),
@@ -123,7 +123,7 @@ func load() *Config {
 		RateLimitWindow:   envOrInt("XALGORIX_RATE_LIMIT_WINDOW", 60),
 
 		// Caido
-		CaidoPort:     envOrInt("CAIDO_PORT", 0),
+		CaidoPort:     envOrInt("CAIDO_PORT", 0), // 0 = auto-detect
 		CaidoAPIToken: envOr("CAIDO_API_TOKEN", ""),
 
 		// Telemetry
@@ -151,6 +151,11 @@ func load() *Config {
 		BrowserPath: envOr("XALGORIX_BROWSER_PATH", ""),
 	}
 
+	// Debug: show loaded config so users can verify correct env was picked up.
+	// Gated behind XALGORIX_DEBUG_CONFIG so it doesn't pollute every CLI
+	// invocation; the install/setup flows that benefit from this can opt in
+	// by exporting the var, and the dashboard logs an explicit "Loaded
+	// config" message at boot anyway.
 	if envOrBool("XALGORIX_DEBUG_CONFIG", false) {
 		maskedKey := ""
 		if len(cfg.APIKey) > 8 {
@@ -268,13 +273,18 @@ func envOrBool(key string, fallback bool) bool {
 }
 
 // loadEnvFile reads a KEY=VALUE env file and sets env vars.
+// Later calls override earlier ones, so higher-priority files should be loaded last.
 func loadEnvFile(path string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return
+		return // File doesn't exist, skip silently
 	}
 	defer f.Close()
 
+	// Warn (and tighten when we own the file) if perms are loose. The env
+	// file holds API keys and the dashboard password in plaintext, so any
+	// group/other read bit is a leak. Skipped on Windows where Unix mode
+	// bits are not meaningful.
 	if runtime.GOOS != "windows" {
 		if info, statErr := f.Stat(); statErr == nil {
 			mode := info.Mode().Perm()
@@ -290,9 +300,11 @@ func loadEnvFile(path string) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
+		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		// Parse KEY=VALUE (strip optional "export " prefix and quotes)
 		line = strings.TrimPrefix(line, "export ")
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
@@ -300,7 +312,9 @@ func loadEnvFile(path string) {
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
+		// Strip surrounding quotes
 		value = strings.Trim(value, "\"'")
+		// Always set — later files override earlier ones
 		os.Setenv(key, value)
 	}
 }

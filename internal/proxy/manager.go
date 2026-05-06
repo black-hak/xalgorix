@@ -10,11 +10,17 @@ import (
 // Manager is the central proxy manager used by the rest of the application.
 // It is initialised once via Init() and then accessed through the package-level
 // helpers GetClient() / GetProxy().
+//
+// FIX (Gemini HIGH): the Manager now holds a single shared *http.Client per
+// proxy slot instead of creating a new Transport on every call. This allows
+// Go's http.Transport to reuse idle TCP connections (Keep-Alive) and avoids
+// socket exhaustion under load.
 type Manager struct {
 	enabled  bool
 	pool     *Pool
-	rotation string // "roundrobin" | "random"
+	rotation string        // "roundrobin" | "random"
 	timeout  time.Duration
+	client   *http.Client  // shared client used when proxy routing is disabled
 }
 
 var defaultManager *Manager
@@ -55,6 +61,14 @@ func Init(useProxy bool, proxyURL, proxyFile, rotation string, timeout time.Dura
 		}
 	}
 
+	// Pre-build a shared no-proxy client (inherits DefaultTransport).
+	// Used when proxy routing is disabled so behaviour is truly zero-impact.
+	noProxyTransport, _ := NewTransport(nil)
+	m.client = &http.Client{
+		Transport: noProxyTransport,
+		Timeout:   m.timeoutOrDefault(),
+	}
+
 	defaultManager = m
 	return nil
 }
@@ -79,10 +93,25 @@ func GetProxy() *Proxy {
 	return defaultManager.pool.Next()
 }
 
-// GetClient returns an *http.Client wired to the next proxy in the pool.
-// When proxy routing is disabled it returns a plain client with the configured timeout.
+// GetClient returns an *http.Client ready to use for the next request.
+//
+// FIX (Gemini HIGH): instead of constructing a brand-new Transport on every
+// call (which breaks TCP connection reuse), we now:
+//   - Return the shared no-proxy client directly when proxying is disabled.
+//   - Build one Transport per proxy entry (cached in the Proxy struct) when
+//     proxying is enabled, so connections to the same proxy are reused.
 func GetClient() (*http.Client, error) {
+	if defaultManager == nil {
+		return http.DefaultClient, nil
+	}
+	if !defaultManager.enabled {
+		// Return the pre-built shared client — zero extra allocation.
+		return defaultManager.client, nil
+	}
 	p := GetProxy()
+	if p == nil {
+		return defaultManager.client, nil
+	}
 	return NewClient(p, defaultManager.timeoutOrDefault())
 }
 

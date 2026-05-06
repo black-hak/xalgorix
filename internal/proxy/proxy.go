@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,18 +40,26 @@ type Proxy struct {
 }
 
 // URL returns the proxy as a *url.URL suitable for http.Transport.
+// FIX (ChatGPT P1): preserve the correct scheme for each proxy type
+// so HTTPS proxies are not silently downgraded to http://.
 func (p *Proxy) URL() (*url.URL, error) {
 	var scheme string
 	switch p.Type {
 	case ProxyTypeSOCKS5:
 		scheme = "socks5"
+	case ProxyTypeHTTPS:
+		scheme = "https"
 	default:
 		scheme = "http"
 	}
 
-	raw := fmt.Sprintf("%s://%s:%s", scheme, p.Host, p.Port)
+	var raw string
 	if p.Username != "" {
-		raw = fmt.Sprintf("%s://%s:%s@%s:%s", scheme, url.QueryEscape(p.Username), url.QueryEscape(p.Password), p.Host, p.Port)
+		raw = fmt.Sprintf("%s://%s:%s@%s:%s", scheme,
+			url.QueryEscape(p.Username), url.QueryEscape(p.Password),
+			p.Host, p.Port)
+	} else {
+		raw = fmt.Sprintf("%s://%s:%s", scheme, p.Host, p.Port)
 	}
 	return url.Parse(raw)
 }
@@ -71,6 +80,7 @@ func (p *Proxy) String() string {
 //   - socks5://user:pass@ip:port  → SOCKS5, with auth
 //   - http://ip:port              → HTTP proxy, no auth
 //   - http://user:pass@ip:port    → HTTP proxy, with auth
+//   - https://ip:port             → HTTPS proxy, no auth
 func Parse(raw string) (*Proxy, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -125,19 +135,24 @@ func parseURI(raw string) (*Proxy, error) {
 	return p, nil
 }
 
+// parsePlain handles the "ip:port" and "ip:port:user:pass" formats.
+// FIX (Gemini medium): use net.SplitHostPort to correctly handle IPv6
+// addresses like [::1]:8080 which contain multiple colons.
 func parsePlain(raw string) (*Proxy, error) {
-	parts := strings.Split(raw, ":")
-	switch len(parts) {
-	case 2:
-		// ip:port
+	// First, try to split as "host:port" (handles IPv6 brackets)
+	// If it succeeds we have a plain ip:port entry.
+	if host, port, err := net.SplitHostPort(raw); err == nil {
 		return &Proxy{
 			Raw:  raw,
 			Type: ProxyTypeHTTP,
-			Host: parts[0],
-			Port: parts[1],
+			Host: host,
+			Port: port,
 		}, nil
-	case 4:
-		// ip:port:user:pass
+	}
+
+	// Fallback: ip:port:user:pass (four colon-separated fields, IPv4 only)
+	parts := strings.Split(raw, ":")
+	if len(parts) == 4 {
 		return &Proxy{
 			Raw:      raw,
 			Type:     ProxyTypeHTTP,
@@ -146,27 +161,32 @@ func parsePlain(raw string) (*Proxy, error) {
 			Username: parts[2],
 			Password: parts[3],
 		}, nil
-	default:
-		return nil, fmt.Errorf("proxy: unrecognised format %q (want ip:port or ip:port:user:pass)", raw)
 	}
+
+	return nil, fmt.Errorf("proxy: unrecognised format %q (want ip:port or ip:port:user:pass)", raw)
 }
 
 // NewTransport creates an *http.Transport configured to use the given proxy.
-// Returns the default transport if p is nil.
+// FIX (Gemini medium + ChatGPT P2):
+//   - When p is nil, return http.DefaultTransport (not a zero-value Transport)
+//     so ProxyFromEnvironment and all tuned defaults are preserved.
+//   - When p is set, clone DefaultTransport and only override Proxy,
+//     so MaxIdleConns, DialContext timeouts, etc. remain optimal.
 func NewTransport(p *Proxy) (*http.Transport, error) {
 	if p == nil {
-		return &http.Transport{}, nil
+		// Return the default transport cast; callers that need a writable copy
+		// should Clone() themselves, but for read-only use this is safe.
+		return http.DefaultTransport.(*http.Transport).Clone(), nil
 	}
 	proxyURL, err := p.URL()
 	if err != nil {
 		return nil, err
 	}
-	return &http.Transport{
-		Proxy:               http.ProxyURL(proxyURL),
-		DisableKeepAlives:   false,
-		IdleConnTimeout:     90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second,
-	}, nil
+	// Clone DefaultTransport to inherit all optimised settings, then
+	// only override the Proxy field.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = http.ProxyURL(proxyURL)
+	return tr, nil
 }
 
 // NewClient returns an *http.Client configured with the given proxy and timeout.
@@ -241,15 +261,17 @@ func (p *Pool) Len() int {
 }
 
 // Next returns the next proxy using round-robin rotation.
-// Returns nil if the pool is empty.
+// FIX (Gemini HIGH): advance the index with modulo BEFORE storing it back
+// so p.index never grows beyond len(proxies)-1 and integer overflow
+// cannot produce a negative index causing a runtime panic.
 func (p *Pool) Next() *Proxy {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.proxies) == 0 {
 		return nil
 	}
-	prx := p.proxies[p.index%len(p.proxies)]
-	p.index++
+	prx := p.proxies[p.index]
+	p.index = (p.index + 1) % len(p.proxies)
 	return prx
 }
 
