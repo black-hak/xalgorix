@@ -53,6 +53,12 @@ type Config struct {
 	Username string // XALGORIX_USERNAME - dashboard login username
 	Password string // XALGORIX_PASSWORD - dashboard login password
 
+	// Proxy settings
+	UseProxy      bool   // XALGORIX_USE_PROXY — enable proxy support
+	ProxyFile     string // XALGORIX_PROXY_FILE — path to proxies.txt
+	ProxyRotation string // XALGORIX_PROXY_ROTATION — "roundrobin" (default) or "random"
+	ProxyURL      string // XALGORIX_PROXY_URL — single proxy URL (overrides file)
+
 	// Paths
 	HomeDir     string // ~/.xalgorix
 	SkillsDir   string // embedded or local skills directory
@@ -107,7 +113,7 @@ func load() *Config {
 		MemCompTimeout:  envOrInt("XALGORIX_MEMORY_COMPRESSOR_TIMEOUT", 30),
 
 		// Runtime
-		RuntimeBackend: "native", // Always native in Go version
+		RuntimeBackend: "native",
 		Workspace:      workspace,
 		DisableBrowser: envOrBool("XALGORIX_DISABLE_BROWSER", false),
 		MaxIterations:  envOrInt("XALGORIX_MAX_ITERATIONS", 0),
@@ -117,7 +123,7 @@ func load() *Config {
 		RateLimitWindow:   envOrInt("XALGORIX_RATE_LIMIT_WINDOW", 60),
 
 		// Caido
-		CaidoPort:     envOrInt("CAIDO_PORT", 0), // 0 = auto-detect
+		CaidoPort:     envOrInt("CAIDO_PORT", 0),
 		CaidoAPIToken: envOr("CAIDO_API_TOKEN", ""),
 
 		// Telemetry
@@ -133,17 +139,18 @@ func load() *Config {
 		Username: envOr("XALGORIX_USERNAME", ""),
 		Password: envOr("XALGORIX_PASSWORD", ""),
 
+		// Proxy
+		UseProxy:      envOrBool("XALGORIX_USE_PROXY", false),
+		ProxyFile:     envOr("XALGORIX_PROXY_FILE", ""),
+		ProxyRotation: envOr("XALGORIX_PROXY_ROTATION", "roundrobin"),
+		ProxyURL:      envOr("XALGORIX_PROXY_URL", ""),
+
 		// Paths
 		HomeDir:     xalgorixHome,
 		SkillsDir:   filepath.Join(xalgorixHome, "skills"),
 		BrowserPath: envOr("XALGORIX_BROWSER_PATH", ""),
 	}
 
-	// Debug: show loaded config so users can verify correct env was picked up.
-	// Gated behind XALGORIX_DEBUG_CONFIG so it doesn't pollute every CLI
-	// invocation; the install/setup flows that benefit from this can opt in
-	// by exporting the var, and the dashboard logs an explicit "Loaded
-	// config" message at boot anyway.
 	if envOrBool("XALGORIX_DEBUG_CONFIG", false) {
 		maskedKey := ""
 		if len(cfg.APIKey) > 8 {
@@ -151,7 +158,7 @@ func load() *Config {
 		} else if cfg.APIKey != "" {
 			maskedKey = "****"
 		}
-		fmt.Printf("[config] Loaded: LLM=%q APIBase=%q APIKey=%s\n", cfg.LLM, cfg.APIBase, maskedKey)
+		fmt.Printf("[config] Loaded: LLM=%q APIBase=%q APIKey=%s UseProxy=%v\n", cfg.LLM, cfg.APIBase, maskedKey, cfg.UseProxy)
 	}
 
 	return cfg
@@ -182,7 +189,6 @@ func (c *Config) Validate() error {
 	if c.APIKey == "" {
 		return fmt.Errorf("XALGORIX_API_KEY is required. Set it in ~/.xalgorix.env")
 	}
-
 	return nil
 }
 
@@ -195,12 +201,10 @@ func CheckEnvFile() error {
 
 	envPath := filepath.Join(home, ".xalgorix.env")
 
-	// Check if file exists
 	if _, err := os.Stat(envPath); os.IsNotExist(err) {
 		return fmt.Errorf("configuration file not found: %s\n\nPlease create it with:\n  XALGORIX_LLM=minimax/MiniMax-M2.7\n  XALGORIX_API_KEY=your_api_key\n\nOr run: xalgorix --setup", envPath)
 	}
 
-	// Read file directly to check for required variables (not system env vars)
 	llm := ""
 	apiKey := ""
 
@@ -264,18 +268,13 @@ func envOrBool(key string, fallback bool) bool {
 }
 
 // loadEnvFile reads a KEY=VALUE env file and sets env vars.
-// Later calls override earlier ones, so higher-priority files should be loaded last.
 func loadEnvFile(path string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return // File doesn't exist, skip silently
+		return
 	}
 	defer f.Close()
 
-	// Warn (and tighten when we own the file) if perms are loose. The env
-	// file holds API keys and the dashboard password in plaintext, so any
-	// group/other read bit is a leak. Skipped on Windows where Unix mode
-	// bits are not meaningful.
 	if runtime.GOOS != "windows" {
 		if info, statErr := f.Stat(); statErr == nil {
 			mode := info.Mode().Perm()
@@ -291,11 +290,9 @@ func loadEnvFile(path string) {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// Parse KEY=VALUE (strip optional "export " prefix and quotes)
 		line = strings.TrimPrefix(line, "export ")
 		parts := strings.SplitN(line, "=", 2)
 		if len(parts) != 2 {
@@ -303,9 +300,7 @@ func loadEnvFile(path string) {
 		}
 		key := strings.TrimSpace(parts[0])
 		value := strings.TrimSpace(parts[1])
-		// Strip surrounding quotes
 		value = strings.Trim(value, "\"'")
-		// Always set — later files override earlier ones
 		os.Setenv(key, value)
 	}
 }

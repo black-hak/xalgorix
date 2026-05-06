@@ -1,0 +1,25 @@
+# Xalgorix — proxy list example
+# One proxy per line. Blank lines and lines starting with # are ignored.
+#
+# Supported formats:
+#   ip:port                     HTTP proxy, no authentication
+#   ip:port:user:pass           HTTP proxy, with authentication
+#   socks5://ip:port            SOCKS5 proxy, no authentication
+#   socks5://user:pass@ip:port  SOCKS5 proxy, with authentication
+#   http://ip:port              HTTP proxy (explicit scheme)
+#   http://user:pass@ip:port    HTTP proxy with authentication (explicit scheme)
+#
+# -----------------------------------------------------------------------
+# HTTP proxies (no auth)
+# -----------------------------------------------------------------------
+1.2.3.4:8080
+5.6.7.8:3128
+
+# HTTP proxies (with auth)
+9.10.11.12:8080:myuser:mypassword
+
+# SOCKS5 proxies (no auth)
+socks5://10.0.0.1:1080
+
+# SOCKS5 proxies (with auth)
+socks5://proxyuser:proxypass@10.0.0.2:1080
