@@ -53,6 +53,16 @@ type Config struct {
 	Username string // XALGORIX_USERNAME - dashboard login username
 	Password string // XALGORIX_PASSWORD - dashboard login password
 
+	// Proxy settings
+	// UseProxy enables proxy support. When false all traffic goes direct.
+	UseProxy bool // XALGORIX_USE_PROXY
+	// ProxyFile is an optional path to a newline-separated list of proxies.
+	// Each line: ip:port  or  ip:port:user:pass  or  socks5://ip:port  etc.
+	ProxyFile string // XALGORIX_PROXY_FILE (e.g. "proxies.txt")
+	// ProxyList is an optional comma-separated inline list of proxies.
+	// Takes precedence over ProxyFile when both are set.
+	ProxyList string // XALGORIX_PROXY_LIST (e.g. "1.2.3.4:8080,5.6.7.8:3128")
+
 	// Paths
 	HomeDir     string // ~/.xalgorix
 	SkillsDir   string // embedded or local skills directory
@@ -133,6 +143,11 @@ func load() *Config {
 		Username: envOr("XALGORIX_USERNAME", ""),
 		Password: envOr("XALGORIX_PASSWORD", ""),
 
+		// Proxy
+		UseProxy:  envOrBool("XALGORIX_USE_PROXY", false),
+		ProxyFile: envOr("XALGORIX_PROXY_FILE", ""),
+		ProxyList: envOr("XALGORIX_PROXY_LIST", ""),
+
 		// Paths
 		HomeDir:     xalgorixHome,
 		SkillsDir:   filepath.Join(xalgorixHome, "skills"),
@@ -151,7 +166,8 @@ func load() *Config {
 		} else if cfg.APIKey != "" {
 			maskedKey = "****"
 		}
-		fmt.Printf("[config] Loaded: LLM=%q APIBase=%q APIKey=%s\n", cfg.LLM, cfg.APIBase, maskedKey)
+		fmt.Printf("[config] Loaded: LLM=%q APIBase=%q APIKey=%s UseProxy=%v ProxyFile=%q\n",
+			cfg.LLM, cfg.APIBase, maskedKey, cfg.UseProxy, cfg.ProxyFile)
 	}
 
 	return cfg
