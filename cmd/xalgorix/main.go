@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xalgord/xalgorix/v4/internal/config"
+	"github.com/xalgord/xalgorix/v4/internal/proxy"
 	"github.com/xalgord/xalgorix/v4/internal/resources"
 	"github.com/xalgord/xalgorix/v4/internal/tui"
 	"github.com/xalgord/xalgorix/v4/internal/web"
@@ -189,6 +190,27 @@ func main() {
 	cfg := config.Get()
 	resources.ProtectCurrentProcess()
 
+	// -------------------------------------------------------------------------
+	// Proxy initialisation — must run before any outbound HTTP requests.
+	// Reads XALGORIX_USE_PROXY, XALGORIX_PROXY_URL, XALGORIX_PROXY_FILE and
+	// XALGORIX_PROXY_ROTATION from the already-loaded config.
+	// When USE_PROXY is false (the default) this is a no-op and all existing
+	// behaviour is preserved.
+	// -------------------------------------------------------------------------
+	if err := proxy.Init(
+		cfg.UseProxy,
+		cfg.ProxyURL,
+		cfg.ProxyFile,
+		cfg.ProxyRotation,
+		30*time.Second,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[proxy] init warning: %v\n", err)
+		// Non-fatal: continue without proxy rather than crashing.
+	}
+	if proxy.Enabled() {
+		fmt.Fprintf(os.Stderr, "[proxy] proxy routing active\n")
+	}
+
 	// Set web package version from main — single source of truth
 	web.Version = version
 
@@ -343,6 +365,12 @@ func printUsage() {
 	fmt.Println("  --stop                   Stop running service")
 	fmt.Println("  --uninstall              Uninstall from system")
 	fmt.Println("  -h, --help                Show help")
+	fmt.Println()
+	fmt.Println("Proxy:")
+	fmt.Println("  XALGORIX_USE_PROXY=true          Enable proxy routing")
+	fmt.Println("  XALGORIX_PROXY_URL=ip:port        Single proxy (HTTP/SOCKS5)")
+	fmt.Println("  XALGORIX_PROXY_FILE=proxies.txt   Proxy list with rotation")
+	fmt.Println("  XALGORIX_PROXY_ROTATION=roundrobin  Rotation: roundrobin or random")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  xalgorix --web")
@@ -649,8 +677,6 @@ func autoUpdate() {
 }
 
 // isNewer returns true if a is newer than b (semver comparison).
-// Non-numeric segments compare as 0 to keep behaviour permissive for tags
-// like "4.2.2-rc1" — pre-release ordering is intentionally not implemented.
 func isNewer(a, b string) bool {
 	partsA := strings.Split(a, ".")
 	partsB := strings.Split(b, ".")
@@ -669,10 +695,6 @@ func isNewer(a, b string) bool {
 }
 
 // execRestart re-executes the current process with the same arguments.
-// On Unix this uses syscall.Exec to replace the process image so PIDs and
-// service supervision (systemd, etc.) stay consistent. On Windows where
-// syscall.Exec is unavailable, it falls back to spawning a child and
-// exiting cleanly.
 func execRestart(path string, argv, env []string) error {
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command(path, argv[1:]...)
@@ -693,7 +715,6 @@ func execRestart(path string, argv, env []string) error {
 func fetchLatestRelease() (version string, downloadURL string) {
 	client := &http.Client{Timeout: 15 * time.Second}
 
-	// GitHub API requires User-Agent header; missing it returns 403
 	req, err := http.NewRequest("GET", "https://api.github.com/repos/xalgord/xalgorix/releases/latest", nil)
 	if err != nil {
 		return "", ""
@@ -708,7 +729,6 @@ func fetchLatestRelease() (version string, downloadURL string) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == 403 || resp.StatusCode == 429 {
-		// Rate limited — fall back to tags API (lighter quota)
 		log.Printf("GitHub API rate limited (HTTP %d), trying tags fallback...", resp.StatusCode)
 		return fetchLatestTag(client)
 	}
@@ -735,7 +755,6 @@ func fetchLatestRelease() (version string, downloadURL string) {
 		return "", ""
 	}
 
-	// Find the binary asset for this OS/arch
 	wantName := fmt.Sprintf("xalgorix-%s-%s", runtime.GOOS, runtime.GOARCH)
 	for _, asset := range release.Assets {
 		if asset.Name == wantName || asset.Name == "xalgorix" {
@@ -743,12 +762,10 @@ func fetchLatestRelease() (version string, downloadURL string) {
 		}
 	}
 
-	// No binary asset found — return version only (will use go install fallback)
 	return ver, ""
 }
 
 // fetchLatestTag uses the git tags API as a fallback when releases API is rate-limited.
-// Returns only the version (no download URL); caller will use go install or direct download.
 func fetchLatestTag(client *http.Client) (string, string) {
 	req, err := http.NewRequest("GET", "https://api.github.com/repos/xalgord/xalgorix/tags?per_page=1", nil)
 	if err != nil {
@@ -778,15 +795,12 @@ func fetchLatestTag(client *http.Client) (string, string) {
 		return "", ""
 	}
 
-	// Build the direct download URL (known pattern)
 	wantName := fmt.Sprintf("xalgorix-%s-%s", runtime.GOOS, runtime.GOARCH)
 	downloadURL := fmt.Sprintf("https://github.com/xalgord/xalgorix/releases/download/v%s/%s", ver, wantName)
 	return ver, downloadURL
 }
 
 // resolveInstallPath determines where the xalgorix binary should be installed.
-// It returns the path of the currently running executable so the update replaces
-// whatever binary the user is actually invoking.
 func resolveInstallPath() string {
 	if execPath, err := os.Executable(); err == nil {
 		if resolved, err := filepath.EvalSymlinks(execPath); err == nil {
@@ -794,7 +808,6 @@ func resolveInstallPath() string {
 		}
 		return execPath
 	}
-	// Fallback: GOPATH/bin
 	goPath := os.Getenv("GOPATH")
 	if goPath == "" {
 		goPath = filepath.Join(os.Getenv("HOME"), "go")
@@ -803,11 +816,9 @@ func resolveInstallPath() string {
 }
 
 // installBinary downloads a binary from url and installs it to destPath.
-// Handles "text file busy" on Linux by removing the old file before moving the new one.
 func installBinary(url, destPath string) error {
-	// Download to a temporary file next to the destination
 	tmpPath := destPath + ".new"
-	defer os.Remove(tmpPath) // cleanup on failure
+	defer os.Remove(tmpPath)
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Get(url)
@@ -831,25 +842,17 @@ func installBinary(url, destPath string) error {
 		return fmt.Errorf("download interrupted: %w", err)
 	}
 
-	// Swap strategy for Linux "text file busy":
-	// 1. Remove the old binary (unlinks it from directory; running process keeps its fd)
-	// 2. Rename the new binary into place (atomic on same filesystem)
 	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
-		// If remove fails (e.g., permission denied), try rename directly
-		// which will fail with ETXTBSY — then try with sudo
 		log.Printf("Warning: could not remove old binary: %v, trying rename...", err)
 	}
 
 	if err := os.Rename(tmpPath, destPath); err != nil {
-		// Last resort: try sudo mv
 		cmd := exec.Command("sudo", "mv", tmpPath, destPath)
 		if sudoErr := cmd.Run(); sudoErr != nil {
 			return fmt.Errorf("failed to install binary (tried mv and sudo mv): %w", err)
 		}
 	}
 
-	// Ensure executable
 	os.Chmod(destPath, 0755)
-
 	return nil
 }
