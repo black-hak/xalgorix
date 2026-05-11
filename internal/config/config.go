@@ -30,6 +30,9 @@ type Config struct {
 	DisableBrowser bool   // XALGORIX_DISABLE_BROWSER
 	MaxIterations  int    // XALGORIX_MAX_ITERATIONS — 0 = unlimited
 
+	// Context window
+	ContextWindow int // XALGORIX_CONTEXT_WINDOW — 0 = auto-detect from model name
+
 	// Rate limiting & API settings
 	RateLimitRequests int // XALGORIX_RATE_LIMIT_REQUESTS — requests per window
 	RateLimitWindow   int // XALGORIX_RATE_LIMIT_WINDOW — window in seconds
@@ -118,6 +121,9 @@ func load() *Config {
 		DisableBrowser: envOrBool("XALGORIX_DISABLE_BROWSER", false),
 		MaxIterations:  envOrInt("XALGORIX_MAX_ITERATIONS", 0),
 
+		// Context window
+		ContextWindow: envOrInt("XALGORIX_CONTEXT_WINDOW", 0),
+
 		// Rate limiting (defaults: 60 requests per 60 seconds)
 		RateLimitRequests: envOrInt("XALGORIX_RATE_LIMIT_REQUESTS", 60),
 		RateLimitWindow:   envOrInt("XALGORIX_RATE_LIMIT_WINDOW", 60),
@@ -195,6 +201,30 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("XALGORIX_API_KEY is required. Set it in ~/.xalgorix.env")
 	}
 	return nil
+}
+
+// ContextWindowSize returns the effective context window token limit for the
+// current model. If XALGORIX_CONTEXT_WINDOW is set explicitly it takes
+// priority; otherwise the value is auto-detected from the model name.
+func (c *Config) ContextWindowSize() int {
+	if c.ContextWindow > 0 {
+		return c.ContextWindow
+	}
+	lower := strings.ToLower(c.LLM)
+	switch {
+	case strings.Contains(lower, "gemini-2"), strings.Contains(lower, "minimax"), strings.Contains(lower, "m2"):
+		return 1_000_000
+	case strings.Contains(lower, "claude"):
+		return 200_000
+	case strings.Contains(lower, "gpt-5"), strings.Contains(lower, "o3"), strings.Contains(lower, "o4"):
+		return 200_000
+	case strings.Contains(lower, "gpt-4o"), strings.Contains(lower, "gpt-4.1"):
+		return 128_000
+	case strings.Contains(lower, "deepseek"):
+		return 64_000
+	default:
+		return 128_000
+	}
 }
 
 // CheckEnvFile checks if .xalgorix.env exists and has valid content.
